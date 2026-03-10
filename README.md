@@ -54,6 +54,44 @@ cd codex2gpt
 3. 把当前 `~/.codex/auth.json` 导入为 `runtime/accounts/oauth-01.json`
 4. 启动本地服务
 
+## 调用示例
+
+```bash
+curl http://127.0.0.1:18100/v1/responses \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"gpt-5.4","input":"用中文打个招呼。","stream":false}'
+```
+
+如果你配置了 `LITE_API_KEY`，再加上：
+
+```bash
+curl http://127.0.0.1:18100/v1/responses \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer YOUR_LOCAL_API_KEY' \
+  -d '{"model":"gpt-5.4","input":"用中文打个招呼。","stream":false}'
+```
+
+健康检查：
+
+```bash
+curl http://127.0.0.1:18100/health
+```
+
+模型列表：
+
+如果你没有配置 `LITE_API_KEY`，模型列表也可以直接调用：
+
+```bash
+curl http://127.0.0.1:18100/v1/models
+```
+
+如果你配置了 `LITE_API_KEY`：
+
+```bash
+curl http://127.0.0.1:18100/v1/models \
+  -H 'Authorization: Bearer YOUR_LOCAL_API_KEY'
+```
+
 ## 模型选择
 
 默认配置里会声明这几个模型：
@@ -187,41 +225,3 @@ curl http://127.0.0.1:18100/v1/responses \
 - 这个代理现在会按 `LITE_MODEL_CONTEXT_WINDOW` 和 `LITE_MODEL_AUTO_COMPACT_TOKEN_LIMIT` 做本地预检查，超过阈值会在本地直接拒绝，避免把明显超限的请求打到上游。
 
 如果上游支持，同样可以继续传 `previous_response_id`、`truncation`、`prompt_cache_key` 等 Responses API 字段。
-
-## 调用示例
-
-```bash
-curl http://127.0.0.1:18100/v1/responses \
-  -H 'Content-Type: application/json' \
-  -d '{"model":"gpt-5.4","input":"用中文打个招呼。","stream":false}'
-```
-
-如果你配置了 `LITE_API_KEY`，再加上：
-
-```bash
-curl http://127.0.0.1:18100/v1/responses \
-  -H 'Content-Type: application/json' \
-  -H 'Authorization: Bearer YOUR_LOCAL_API_KEY' \
-  -d '{"model":"gpt-5.4","input":"用中文打个招呼。","stream":false}'
-```
-
-健康检查：
-
-```bash
-curl http://127.0.0.1:18100/health
-```
-
-模型列表：
-
-如果你没有配置 `LITE_API_KEY`，模型列表也可以直接调用：
-
-```bash
-curl http://127.0.0.1:18100/v1/models
-```
-
-如果你配置了 `LITE_API_KEY`：
-
-```bash
-curl http://127.0.0.1:18100/v1/models \
-  -H 'Authorization: Bearer YOUR_LOCAL_API_KEY'
-```
