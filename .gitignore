@@ -1,0 +1,7 @@
+runtime/
+*.log
+*.pid
+*.tmp
+.DS_Store
+AGENTS.md
+agent.md
