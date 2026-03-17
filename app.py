@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import io
 import json
 import os
 import threading
@@ -140,6 +141,7 @@ class AccountPool:
         self.accounts = []
         self.cooldowns = {}
         self.sticky_sessions = {}
+        self.preferred_account_name = ""
         self.next_index = 0
         self.reload()
 
@@ -160,6 +162,8 @@ class AccountPool:
                 for session_key, binding in self.sticky_sessions.items()
                 if binding["expires_at"] > time.time() and any(account.name == binding["account_name"] for account in accounts)
             }
+            if self.preferred_account_name and not any(account.name == self.preferred_account_name for account in accounts):
+                self.preferred_account_name = ""
             if self.accounts:
                 self.next_index %= len(self.accounts)
             else:
@@ -178,6 +182,10 @@ class AccountPool:
             self._prune_sticky_sessions_locked()
             return len(self.sticky_sessions)
 
+    def preferred_account(self):
+        with self.lock:
+            return self.preferred_account_name
+
     def _prune_sticky_sessions_locked(self):
         now = time.time()
         self.sticky_sessions = {
@@ -185,6 +193,21 @@ class AccountPool:
             for session_key, binding in self.sticky_sessions.items()
             if binding["expires_at"] > now
         }
+
+    def _prefer_account_locked(self, ordered, preferred_name):
+        preferred_name = preferred_name.strip()
+        if not preferred_name:
+            return ordered
+        preferred = None
+        others = []
+        for account in ordered:
+            if account.name == preferred_name and preferred is None:
+                preferred = account
+            else:
+                others.append(account)
+        if preferred is None:
+            return ordered
+        return [preferred] + others
 
     def _base_order_locked(self):
         accounts = list(self.accounts)
@@ -195,7 +218,8 @@ class AccountPool:
         ordered = accounts[start:] + accounts[:start]
         now = time.time()
         active = [a for a in ordered if self.cooldowns.get(a.name, 0) <= now]
-        return active or ordered
+        ordered = active or ordered
+        return self._prefer_account_locked(ordered, self.preferred_account_name)
 
     def candidates(self, session_key: str = ""):
         with self.lock:
@@ -209,18 +233,11 @@ class AccountPool:
             binding = self.sticky_sessions.get(session_key)
             if not binding:
                 return ordered
-            preferred_name = binding["account_name"]
-            preferred = None
-            others = []
-            for account in ordered:
-                if account.name == preferred_name and preferred is None:
-                    preferred = account
-                else:
-                    others.append(account)
-            if preferred is None:
+            reordered = self._prefer_account_locked(ordered, binding["account_name"])
+            if reordered == ordered:
                 self.sticky_sessions.pop(session_key, None)
                 return ordered
-            return [preferred] + others
+            return reordered
 
     def bind_session(self, session_key: str, account_name: str):
         session_key = session_key.strip()
@@ -233,17 +250,29 @@ class AccountPool:
                 "expires_at": time.time() + max(1, SESSION_STICKY_TTL),
             }
 
+    def mark_success(self, account_name: str):
+        account_name = account_name.strip()
+        if not account_name:
+            return
+        with self.lock:
+            self.cooldowns.pop(account_name, None)
+            self.preferred_account_name = account_name
+
     def mark_failure(self, account_name: str, error):
         cooldown = 30
         if isinstance(error, urllib.error.HTTPError):
             if error.code == 429:
                 cooldown = 300
+            elif error.code == 402:
+                cooldown = 3600
             elif error.code in {401, 403}:
                 cooldown = 120
             elif error.code >= 500:
                 cooldown = 30
         with self.lock:
             self.cooldowns[account_name] = time.time() + cooldown
+            if self.preferred_account_name == account_name:
+                self.preferred_account_name = ""
             self.sticky_sessions = {
                 session_key: binding
                 for session_key, binding in self.sticky_sessions.items()
@@ -710,6 +739,28 @@ def is_retryable_error(error):
     return isinstance(error, urllib.error.URLError)
 
 
+def read_http_error_body(error):
+    cached = getattr(error, "_cached_body", None)
+    if cached is not None:
+        return cached
+    body = error.read()
+    error._cached_body = body
+    error.fp = io.BytesIO(body)
+    return body
+
+
+def is_account_unusable_error(error):
+    if not isinstance(error, urllib.error.HTTPError) or error.code != 402:
+        return False
+    body = read_http_error_body(error)
+    try:
+        payload = json.loads(body.decode("utf-8", errors="replace"))
+    except json.JSONDecodeError:
+        return False
+    detail = payload.get("detail")
+    return isinstance(detail, dict) and str(detail.get("code", "")).strip() == "deactivated_workspace"
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -742,6 +793,7 @@ class Handler(BaseHTTPRequestHandler):
                     "status": "ok",
                     "accounts": pool.names(),
                     "sticky_sessions": pool.sticky_size(),
+                    "preferred_account": pool.preferred_account(),
                     "model_context_window": DEFAULT_MODEL_CONTEXT_WINDOW,
                     "model_auto_compact_token_limit": DEFAULT_MODEL_AUTO_COMPACT_TOKEN_LIMIT,
                 },
@@ -869,18 +921,22 @@ class Handler(BaseHTTPRequestHandler):
         if not accounts:
             raise RuntimeError(f"no oauth json found in {AUTH_DIR}")
         last_error = None
+        preferred_error = None
         for account in accounts:
             try:
                 upstream = self._upstream_once(payload, account, session_key)
+                pool.mark_success(account.name)
                 if session_key:
                     pool.bind_session(session_key, account.name)
                 return upstream
             except Exception as exc:
                 last_error = exc
+                if not is_account_unusable_error(exc):
+                    preferred_error = exc
                 pool.mark_failure(account.name, exc)
-                if not is_retryable_error(exc):
+                if not is_retryable_error(exc) and not is_account_unusable_error(exc):
                     raise
-        raise last_error or RuntimeError("all accounts failed")
+        raise preferred_error or last_error or RuntimeError("all accounts failed")
 
     def _fetch_final_response(self, payload, session_key):
         with self._upstream(payload, session_key) as upstream:
@@ -928,7 +984,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.flush()
 
     def _forward_http_error(self, exc):
-        body = exc.read().decode("utf-8", errors="replace")
+        body = read_http_error_body(exc).decode("utf-8", errors="replace")
         try:
             payload = json.loads(body)
         except json.JSONDecodeError:
