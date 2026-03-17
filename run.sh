@@ -231,12 +231,12 @@ start() {
   if ! find "$ACCOUNTS_DIR" -maxdepth 1 -name '*.json' | grep -q .; then
     echo "no oauth json found in $ACCOUNTS_DIR"
     echo "login first, then run: ./run.sh add-auth oauth-01"
-    exit 1
+    return 1
   fi
   if is_running; then
     sync_pid_file >/dev/null 2>&1 || true
     echo "already running: pid $(cat "$PID_FILE")"
-    exit 0
+    return 0
   fi
   rm -f "$PID_FILE"
   PID="$(
@@ -279,7 +279,7 @@ print(proc.pid)
   if ! wait_for_health; then
     echo "start failed, check $LOG_FILE"
     rm -f "$PID_FILE"
-    exit 1
+    return 1
   fi
   echo "started"
   echo "base_url=http://${LITE_HOST}:${LITE_PORT}/v1"
@@ -306,13 +306,14 @@ stop() {
     kill "$PID" 2>/dev/null || true
     if ! wait_for_stop; then
       echo "stop failed, process still listening on port $LITE_PORT"
-      exit 1
+      return 1
     fi
     echo "stopped"
-    exit 0
+    return 0
   fi
   rm -f "$PID_FILE"
   echo "already stopped"
+  return 0
 }
 
 restart() {
@@ -343,7 +344,7 @@ add_auth() {
   NAME="${2:-}"
   if [ ! -f "$HOME/.codex/auth.json" ]; then
     echo "missing $HOME/.codex/auth.json"
-    exit 1
+    return 1
   fi
   if [ -z "$NAME" ]; then
     COUNT="$(find "$ACCOUNTS_DIR" -maxdepth 1 -name '*.json' | wc -l | tr -d ' ')"
@@ -351,6 +352,7 @@ add_auth() {
   fi
   cp "$HOME/.codex/auth.json" "$ACCOUNTS_DIR/$NAME.json"
   echo "saved=$ACCOUNTS_DIR/$NAME.json"
+  return 0
 }
 
 usage() {
