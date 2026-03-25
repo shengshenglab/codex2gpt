@@ -8,7 +8,7 @@ It is designed for local or private-network use when you want one stable entry p
 
 ## What This Repository Is
 
-This project mainly does four things:
+This project mainly does five things:
 
 - translates multiple client protocols into the Codex backend shape
 - manages multiple local OAuth accounts and routes traffic across them
