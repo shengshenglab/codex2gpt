@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import threading
 import time
+import tomllib
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -61,6 +62,8 @@ CODEX_AUTH_PATH = os.path.abspath(
 WEB_DIR = os.path.abspath(os.environ.get("LITE_WEB_DIR", os.path.join(BASE_DIR, "web")))
 DEFAULT_MODEL = os.environ.get("LITE_MODEL", "gpt-5.4")
 DEFAULT_MODELS_RAW = os.environ.get("LITE_MODELS", "")
+MODEL_OVERRIDES_JSON = os.environ.get("LITE_MODEL_OVERRIDES_JSON", "").strip()
+MODEL_OVERRIDES_PATH = os.path.abspath(os.environ.get("LITE_MODEL_OVERRIDES_PATH", os.path.join(BASE_DIR, "model-overrides.toml")))
 DEFAULT_INSTRUCTIONS = os.environ.get("LITE_INSTRUCTIONS", "You are a helpful coding assistant.")
 DEFAULT_REASONING_EFFORT = os.environ.get("LITE_REASONING_EFFORT", "medium").strip() or "medium"
 DEFAULT_TEXT_VERBOSITY = os.environ.get("LITE_TEXT_VERBOSITY", "high").strip() or "high"
@@ -106,6 +109,7 @@ UNSUPPORTED_TOP_LEVEL_FIELDS = {
     "max_output_tokens",
     "max_tokens",
     "max_completion_tokens",
+    "temperature",
     "metadata",
     "service_tier",
     "output_config",
@@ -125,8 +129,9 @@ REASONING_EFFORT_VALUES = {"minimal", "low", "medium", "high", "xhigh"}
 OPENAI_RESPONSE_FORMAT_TYPES = {"json_object", "json_schema", "text"}
 ANTHROPIC_VERSION_HEADER = "anthropic-version"
 ANTHROPIC_MODEL_ALIASES = {
-    "claude-opus-4-6": "gpt-5.4",
-    "claude-sonnet-4-6": "gpt-5.3-codex",
+    "claude-opus-4-6": "gpt-5.4-1m",
+    "claude-sonnet-4-6": "gpt-5.4",
+    "claude-haiku-4-5": "gpt-5.3-codex",
 }
 ANTHROPIC_SUPPORTED_MODELS = set(ANTHROPIC_MODEL_ALIASES) | {"gpt-5.4", "gpt-5.3-codex"}
 GEMINI_ACTIONS = {"generateContent", "streamGenerateContent"}
@@ -153,6 +158,107 @@ def parse_models(raw: str):
 
 
 ADVERTISED_MODELS = parse_models(DEFAULT_MODELS_RAW)
+
+
+def positive_int_or_none(value: Any):
+    try:
+        current = int(value)
+    except (TypeError, ValueError):
+        return None
+    if current <= 0:
+        return None
+    return current
+
+
+def load_model_overrides():
+    payload = {}
+    if MODEL_OVERRIDES_JSON:
+        try:
+            payload = json.loads(MODEL_OVERRIDES_JSON)
+        except Exception:
+            payload = {}
+    else:
+        try:
+            with open(MODEL_OVERRIDES_PATH, "rb") as f:
+                payload = tomllib.load(f)
+        except Exception:
+            payload = {}
+        if isinstance(payload, dict):
+            payload = payload.get("model_overrides") or {}
+    if not isinstance(payload, dict):
+        return {}
+
+    overrides = {}
+    for model_name, config in payload.items():
+        name = str(model_name or "").strip()
+        if not name or not isinstance(config, dict):
+            continue
+        upstream_model = str(config.get("upstream_model") or name).strip() or name
+        context_window = positive_int_or_none(config.get("context_window")) or DEFAULT_MODEL_CONTEXT_WINDOW
+        auto_compact = positive_int_or_none(config.get("auto_compact_token_limit"))
+        if auto_compact is None:
+            auto_compact = (context_window * 9) // 10
+        auto_compact = min(auto_compact, context_window)
+        overrides[name] = {
+            "upstream_model": upstream_model,
+            "context_window": context_window,
+            "auto_compact_token_limit": auto_compact,
+            "advertise": bool(config.get("advertise")),
+        }
+    return overrides
+
+
+MODEL_OVERRIDES = load_model_overrides()
+
+
+def resolve_model_spec(model_name: Any):
+    requested_model = str(model_name or DEFAULT_MODEL).strip() or DEFAULT_MODEL
+    override = MODEL_OVERRIDES.get(requested_model)
+    if override:
+        return {
+            "requested_model": requested_model,
+            "effective_model": str(override.get("upstream_model") or requested_model),
+            "context_window": int(override.get("context_window") or DEFAULT_MODEL_CONTEXT_WINDOW),
+            "auto_compact_token_limit": int(
+                override.get("auto_compact_token_limit") or DEFAULT_MODEL_AUTO_COMPACT_TOKEN_LIMIT
+            ),
+            "advertise": bool(override.get("advertise")),
+        }
+    return {
+        "requested_model": requested_model,
+        "effective_model": requested_model,
+        "context_window": DEFAULT_MODEL_CONTEXT_WINDOW,
+        "auto_compact_token_limit": DEFAULT_MODEL_AUTO_COMPACT_TOKEN_LIMIT,
+        "advertise": requested_model in ADVERTISED_MODELS,
+    }
+
+
+def configured_model_overrides_snapshot():
+    snapshot = {}
+    for model_name, config in MODEL_OVERRIDES.items():
+        snapshot[model_name] = {
+            "effective_model": str(config.get("upstream_model") or model_name),
+            "context_window": int(config.get("context_window") or DEFAULT_MODEL_CONTEXT_WINDOW),
+            "auto_compact_token_limit": int(
+                config.get("auto_compact_token_limit") or DEFAULT_MODEL_AUTO_COMPACT_TOKEN_LIMIT
+            ),
+            "advertise": bool(config.get("advertise")),
+        }
+    return snapshot
+
+
+def advertised_model_entries():
+    entries = []
+    seen = set()
+    for model_name in ADVERTISED_MODELS:
+        entries.append((model_name, resolve_model_spec(model_name)))
+        seen.add(model_name)
+    for model_name, config in MODEL_OVERRIDES.items():
+        if not bool(config.get("advertise")) or model_name in seen:
+            continue
+        entries.append((model_name, resolve_model_spec(model_name)))
+        seen.add(model_name)
+    return entries
 
 
 def ensure_parent_dir(path):
@@ -1159,9 +1265,9 @@ def advertised_model_catalog():
             "owned_by": "openai",
             "type": "model",
             "display_name": model,
-            "supported_plans": list(plans.get(model) or []),
+            "supported_plans": list(plans.get(model) or plans.get(spec["effective_model"]) or []),
         }
-        for model in ADVERTISED_MODELS
+        for model, spec in advertised_model_entries()
     ]
 
 
@@ -2885,7 +2991,8 @@ def normalize_response_format(format_value):
 
 def normalize_payload(raw_payload):
     payload = strip_unsupported_top_level_fields(raw_payload)
-    payload["model"] = str(payload.get("model") or DEFAULT_MODEL)
+    model_spec = resolve_model_spec(payload.get("model") or DEFAULT_MODEL)
+    payload["model"] = model_spec["effective_model"]
     payload["input"] = normalize_input(payload.get("input", ""))
     payload["store"] = False
     instructions = payload.get("instructions")
@@ -3139,10 +3246,25 @@ def normalize_anthropic_model(model):
     model_name = str(model or "").strip()
     if not model_name:
         raise ProxyError(400, "invalid_request_error", "model is required")
-    mapped = ANTHROPIC_MODEL_ALIASES.get(model_name, model_name)
-    if mapped not in {"gpt-5.4", "gpt-5.3-codex"} or model_name not in ANTHROPIC_SUPPORTED_MODELS:
+    if model_name in ANTHROPIC_MODEL_ALIASES:
+        mapped = ANTHROPIC_MODEL_ALIASES[model_name]
+    else:
+        mapped = model_name
+    mapped_spec = resolve_model_spec(mapped)
+    if mapped_spec["effective_model"] not in {"gpt-5.4", "gpt-5.3-codex"}:
+        raise ProxyError(400, "invalid_request_error", f"unsupported model: {model_name}")
+    if model_name not in ANTHROPIC_SUPPORTED_MODELS and model_name not in MODEL_OVERRIDES:
         raise ProxyError(400, "invalid_request_error", f"unsupported model: {model_name}")
     return model_name, mapped
+
+
+def anthropic_budget_model(model_name):
+    name = str(model_name or "").strip()
+    if not name:
+        return DEFAULT_MODEL
+    if name in ANTHROPIC_MODEL_ALIASES:
+        return ANTHROPIC_MODEL_ALIASES[name]
+    return name
 
 
 def require_anthropic_max_tokens(raw_payload):
@@ -3560,20 +3682,22 @@ def apply_session_response_context(payload, session_key):
     return payload
 
 
-def validate_context_budget(payload):
+def validate_context_budget(payload, *, requested_model=None):
     estimated = estimate_request_tokens(payload)
-    compact_limit = min(DEFAULT_MODEL_AUTO_COMPACT_TOKEN_LIMIT, DEFAULT_MODEL_CONTEXT_WINDOW)
-    if estimated > DEFAULT_MODEL_CONTEXT_WINDOW:
-        return estimated, (
+    model_spec = resolve_model_spec(requested_model or payload.get("model"))
+    context_window = int(model_spec["context_window"])
+    compact_limit = min(int(model_spec["auto_compact_token_limit"]), context_window)
+    if estimated > context_window:
+        return estimated, model_spec, (
             f"estimated input tokens {estimated} exceed configured model context window "
-            f"{DEFAULT_MODEL_CONTEXT_WINDOW}"
+            f"{context_window}"
         )
     if estimated > compact_limit:
-        return estimated, (
+        return estimated, model_spec, (
             f"estimated input tokens {estimated} exceed configured auto compact guard "
             f"{compact_limit}; this proxy does not compact context automatically"
         )
-    return estimated, None
+    return estimated, model_spec, None
 
 
 def extract_final_response(sse_body: str):
@@ -4508,6 +4632,7 @@ class Handler(BaseHTTPRequestHandler):
                     "queued_requests": session_stats["queued_requests"],
                     "model_context_window": DEFAULT_MODEL_CONTEXT_WINDOW,
                     "model_auto_compact_token_limit": DEFAULT_MODEL_AUTO_COMPACT_TOKEN_LIMIT,
+                    "model_overrides": configured_model_overrides_snapshot(),
                     "transcripts_enabled": transcript_store.enabled,
                     "transcript_dir": transcript_store.base_dir,
                     "rotation_mode": current_rotation_mode(),
@@ -4558,6 +4683,7 @@ class Handler(BaseHTTPRequestHandler):
                     "responses_transport": current_responses_transport_mode(),
                     "transport_backend": FINGERPRINT_CACHE.get("transport_backend"),
                     "websocket_transport_available": websocket_transport_available(),
+                    "model_overrides": configured_model_overrides_snapshot(),
                     "account_statuses": runtime_account_status_summary(),
                     "warnings": runtime_warning_summary(),
                     "fingerprint": FINGERPRINT_CACHE,
@@ -4611,6 +4737,7 @@ class Handler(BaseHTTPRequestHandler):
                 {
                     "data": advertised_model_catalog(),
                     "default_model": DEFAULT_MODEL,
+                    "model_overrides": configured_model_overrides_snapshot(),
                     "rotation_mode": current_rotation_mode(),
                 },
             )
@@ -4628,7 +4755,7 @@ class Handler(BaseHTTPRequestHandler):
                             "description": "Codex2gpt Gemini-compatible model shim",
                             "supportedGenerationMethods": sorted(GEMINI_ACTIONS),
                         }
-                        for model in ADVERTISED_MODELS
+                        for model, _ in advertised_model_entries()
                     ]
                 },
             )
@@ -5260,7 +5387,9 @@ class Handler(BaseHTTPRequestHandler):
                 self._write_anthropic_error(400, "invalid_request_error", str(exc))
                 return
 
-            estimated_tokens, budget_error = validate_context_budget(payload)
+            estimated_tokens, budget_spec, budget_error = validate_context_budget(
+                payload, requested_model=anthropic_budget_model(requested_model)
+            )
             if budget_error:
                 self._record_failed_transcript(
                     path,
@@ -5274,7 +5403,21 @@ class Handler(BaseHTTPRequestHandler):
                     400,
                     budget_error,
                 )
-                self._write_anthropic_error(400, "invalid_request_error", budget_error)
+                self._write_json(
+                    400,
+                    {
+                        "type": "error",
+                        "error": {
+                            "type": "invalid_request_error",
+                            "message": budget_error,
+                            "estimated_input_tokens": estimated_tokens,
+                            "requested_model": budget_spec["requested_model"],
+                            "effective_model": budget_spec["effective_model"],
+                            "model_context_window": budget_spec["context_window"],
+                            "model_auto_compact_token_limit": budget_spec["auto_compact_token_limit"],
+                        },
+                    },
+                )
                 return
 
             try:
@@ -5387,7 +5530,10 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 self._write_json(400, {"error": {"type": "invalid_request_error", "message": str(exc)}})
                 return
-            estimated_tokens, budget_error = validate_context_budget(payload)
+            requested_model_name = str(raw_payload.get("model") or payload.get("model") or DEFAULT_MODEL)
+            estimated_tokens, budget_spec, budget_error = validate_context_budget(
+                payload, requested_model=requested_model_name
+            )
             if budget_error:
                 self._record_failed_transcript(
                     path,
@@ -5408,8 +5554,10 @@ class Handler(BaseHTTPRequestHandler):
                             "type": "context_limit_error",
                             "message": budget_error,
                             "estimated_input_tokens": estimated_tokens,
-                            "model_context_window": DEFAULT_MODEL_CONTEXT_WINDOW,
-                            "model_auto_compact_token_limit": DEFAULT_MODEL_AUTO_COMPACT_TOKEN_LIMIT,
+                            "requested_model": budget_spec["requested_model"],
+                            "effective_model": budget_spec["effective_model"],
+                            "model_context_window": budget_spec["context_window"],
+                            "model_auto_compact_token_limit": budget_spec["auto_compact_token_limit"],
                         }
                     },
                 )
@@ -5508,7 +5656,10 @@ class Handler(BaseHTTPRequestHandler):
             self._write_json(400, {"error": {"type": "invalid_request_error", "message": str(exc)}})
             return
 
-        estimated_tokens, budget_error = validate_context_budget(payload)
+        requested_model_name = str(raw_payload.get("model") or payload.get("model") or DEFAULT_MODEL)
+        estimated_tokens, budget_spec, budget_error = validate_context_budget(
+            payload, requested_model=requested_model_name
+        )
         if budget_error:
             self._record_failed_transcript(
                 path,
@@ -5529,8 +5680,10 @@ class Handler(BaseHTTPRequestHandler):
                         "type": "context_limit_error",
                         "message": budget_error,
                         "estimated_input_tokens": estimated_tokens,
-                        "model_context_window": DEFAULT_MODEL_CONTEXT_WINDOW,
-                        "model_auto_compact_token_limit": DEFAULT_MODEL_AUTO_COMPACT_TOKEN_LIMIT,
+                        "requested_model": budget_spec["requested_model"],
+                        "effective_model": budget_spec["effective_model"],
+                        "model_context_window": budget_spec["context_window"],
+                        "model_auto_compact_token_limit": budget_spec["auto_compact_token_limit"],
                     }
                 },
             )

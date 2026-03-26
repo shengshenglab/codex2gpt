@@ -1,0 +1,5 @@
+[model_overrides."gpt-5.4-1m"]
+upstream_model = "gpt-5.4"
+context_window = 1000000
+auto_compact_token_limit = 900000
+advertise = true

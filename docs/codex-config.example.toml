@@ -1,0 +1,14 @@
+model = "gpt-5.4"
+model_reasoning_effort = "high"
+model_context_window = 258400
+model_auto_compact_token_limit = 232560
+
+# Project-local codex2gpt model overrides live in ./model-overrides.toml.
+# They are loaded separately from ~/.codex/config.toml, so global defaults
+# can stay in the user config while model-specific 1M aliases live in-project.
+
+[model_overrides."gpt-5.4-1m"]
+upstream_model = "gpt-5.4"
+context_window = 1000000
+auto_compact_token_limit = 900000
+advertise = true

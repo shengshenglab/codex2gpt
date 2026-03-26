@@ -137,7 +137,39 @@ curl http://127.0.0.1:18100/v1/chat/completions \
   }'
 ```
 
+Model-specific context override example:
+
+The project root now loads [model-overrides.toml](model-overrides.toml) by default. It can expose an extra local model named `gpt-5.4-1m`. It still maps to upstream `gpt-5.4`, but uses its own 1M context budget:
+
+```toml
+[model_overrides."gpt-5.4-1m"]
+upstream_model = "gpt-5.4"
+context_window = 1000000
+auto_compact_token_limit = 900000
+advertise = true
+```
+
+Other models still use the global defaults from `~/.codex/config.toml`. See the full example in [docs/codex-config.example.toml](docs/codex-config.example.toml).
+
+Notes:
+
+- `gpt-5.4` remains the normal-context variant and keeps using the global default window.
+- `gpt-5.4-1m` is an extra local model exposed by this proxy. It is only distinct inside the proxy layer, and still resolves to upstream `gpt-5.4`.
+- Use `gpt-5.4-1m` only when you truly need very long context. A 1M window can materially increase input token usage, which may also mean higher cost, slower requests, and more aggressive context compaction.
+
 Call Anthropic Messages:
+
+Current Anthropic compatibility mappings:
+
+- `claude-opus-4-6` -> local `gpt-5.4-1m` -> upstream `gpt-5.4`
+- `claude-sonnet-4-6` -> local `gpt-5.4` -> upstream `gpt-5.4`
+- `claude-haiku-4-5` -> local `gpt-5.3-codex` -> upstream `gpt-5.3-codex`
+
+Special note for 1M on the Anthropic-compatible layer:
+
+- `claude-opus-4-6` now uses the `gpt-5.4-1m` budget, so it is the 1M-context variant by default.
+- If you want the Anthropic-compatible endpoint to stay on the normal window, use `claude-sonnet-4-6`.
+- Choosing `claude-opus-4-6` can also mean higher token usage, potentially higher cost, and slower request latency.
 
 ```bash
 curl http://127.0.0.1:18100/v1/messages \

@@ -7,6 +7,7 @@ ACCOUNTS_DIR="$RUNTIME_DIR/accounts"
 ENV_FILE="$RUNTIME_DIR/lite.env"
 PID_FILE="$RUNTIME_DIR/server.pid"
 LOG_FILE="$RUNTIME_DIR/server.log"
+MODEL_OVERRIDES_FILE="${LITE_MODEL_OVERRIDES_PATH:-$BASE_DIR/model-overrides.toml}"
 
 python_bin() {
   command -v python3
@@ -113,6 +114,62 @@ except Exception:
 if auto_compact is None:
     auto_compact = (context_window * 9) // 10
 print(auto_compact)
+PY
+}
+
+detect_model_overrides_json() {
+  MODEL_OVERRIDES_FILE="$MODEL_OVERRIDES_FILE" "$(python_bin)" - <<'PY'
+from pathlib import Path
+import json
+import os
+import tomllib
+
+config = Path(os.environ.get("MODEL_OVERRIDES_FILE", ""))
+
+def coerce_positive_int(value):
+    try:
+        current = int(value)
+    except (TypeError, ValueError):
+        return None
+    if current <= 0:
+        return None
+    return current
+
+def flatten(prefix, value, out):
+    if not isinstance(value, dict):
+        return
+    marker_keys = {"upstream_model", "context_window", "auto_compact_token_limit", "advertise"}
+    if prefix and any(key in value for key in marker_keys):
+        model_name = ".".join(prefix)
+        payload = {}
+        upstream = str(value.get("upstream_model") or "").strip()
+        if upstream:
+            payload["upstream_model"] = upstream
+        context_window = coerce_positive_int(value.get("context_window"))
+        if context_window is not None:
+            payload["context_window"] = context_window
+        auto_compact = coerce_positive_int(value.get("auto_compact_token_limit"))
+        if auto_compact is not None:
+            payload["auto_compact_token_limit"] = auto_compact
+        if "advertise" in value:
+            payload["advertise"] = bool(value.get("advertise"))
+        if payload:
+            out[model_name] = payload
+        return
+    for key, child in value.items():
+        name = str(key or "").strip()
+        if not name:
+            continue
+        flatten([*prefix, name], child, out)
+
+output = {}
+try:
+    data = tomllib.loads(config.read_text(encoding="utf-8"))
+    flatten([], data.get("model_overrides"), output)
+except Exception:
+    pass
+
+print(json.dumps(output, ensure_ascii=False, separators=(",", ":")))
 PY
 }
 
@@ -228,6 +285,7 @@ start() {
   ensure_layout
   load_env
   import_default_auth_if_needed
+  CURRENT_MODEL_OVERRIDES_JSON="$(detect_model_overrides_json)"
   if ! find "$ACCOUNTS_DIR" -maxdepth 1 -name '*.json' | grep -q .; then
     echo "no oauth json found in $ACCOUNTS_DIR"
     echo "login first, then run: ./run.sh add-auth oauth-01"
@@ -250,6 +308,7 @@ start() {
     LITE_TEXT_VERBOSITY="${LITE_TEXT_VERBOSITY:-high}" \
     LITE_MODEL_CONTEXT_WINDOW="${LITE_MODEL_CONTEXT_WINDOW:-258400}" \
     LITE_MODEL_AUTO_COMPACT_TOKEN_LIMIT="${LITE_MODEL_AUTO_COMPACT_TOKEN_LIMIT:-232560}" \
+    LITE_MODEL_OVERRIDES_JSON="$CURRENT_MODEL_OVERRIDES_JSON" \
     LITE_AUTH_DIR="$LITE_AUTH_DIR" \
     LITE_API_KEY="$LITE_API_KEY" \
     "$(python_bin)" -c '

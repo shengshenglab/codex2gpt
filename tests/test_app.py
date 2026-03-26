@@ -138,6 +138,60 @@ def run_test_server(module, fetch_response=None, upstream_body=None, upstream_st
 
 
 class Codex2GptCompatibilityTests(unittest.TestCase):
+    def test_normalize_payload_applies_configured_model_override(self):
+        app, tempdir, original_auth_dir = load_app_module(
+            {
+                "LITE_MODEL_OVERRIDES_JSON": json.dumps(
+                    {
+                        "gpt-5.4-1m": {
+                            "upstream_model": "gpt-5.4",
+                            "context_window": 1000000,
+                            "auto_compact_token_limit": 900000,
+                            "advertise": True,
+                        }
+                    }
+                )
+            }
+        )
+        try:
+            payload = app.normalize_payload({"model": "gpt-5.4-1m", "input": "hello"})
+            spec = app.resolve_model_spec("gpt-5.4-1m")
+            self.assertEqual(payload["model"], "gpt-5.4")
+            self.assertEqual(spec["effective_model"], "gpt-5.4")
+            self.assertEqual(spec["context_window"], 1000000)
+            self.assertEqual(spec["auto_compact_token_limit"], 900000)
+        finally:
+            restore_auth_dir(tempdir, original_auth_dir)
+
+    def test_validate_context_budget_uses_override_thresholds(self):
+        app, tempdir, original_auth_dir = load_app_module(
+            {
+                "LITE_MODEL_CONTEXT_WINDOW": "258400",
+                "LITE_MODEL_AUTO_COMPACT_TOKEN_LIMIT": "232560",
+                "LITE_MODEL_OVERRIDES_JSON": json.dumps(
+                    {
+                        "gpt-5.4-1m": {
+                            "upstream_model": "gpt-5.4",
+                            "context_window": 60,
+                            "auto_compact_token_limit": 50,
+                            "advertise": True,
+                        }
+                    }
+                ),
+            }
+        )
+        try:
+            payload = app.normalize_payload({"model": "gpt-5.4-1m", "input": "x" * 400})
+            estimated, spec, error = app.validate_context_budget(payload, requested_model="gpt-5.4-1m")
+            self.assertGreater(estimated, 60)
+            self.assertEqual(spec["requested_model"], "gpt-5.4-1m")
+            self.assertEqual(spec["effective_model"], "gpt-5.4")
+            self.assertEqual(spec["context_window"], 60)
+            self.assertEqual(spec["auto_compact_token_limit"], 50)
+            self.assertIn("configured model context window 60", error)
+        finally:
+            restore_auth_dir(tempdir, original_auth_dir)
+
     def test_normalize_codex_auth_payload_flattens_tokens_and_timestamp(self):
         app, tempdir, original_auth_dir = load_app_module()
         try:
@@ -317,7 +371,20 @@ class Codex2GptCompatibilityTests(unittest.TestCase):
             restore_auth_dir(tempdir, original_auth_dir)
 
     def test_build_responses_payload_from_anthropic_text_message(self):
-        app, tempdir, original_auth_dir = load_app_module()
+        app, tempdir, original_auth_dir = load_app_module(
+            {
+                "LITE_MODEL_OVERRIDES_JSON": json.dumps(
+                    {
+                        "gpt-5.4-1m": {
+                            "upstream_model": "gpt-5.4",
+                            "context_window": 1000000,
+                            "auto_compact_token_limit": 900000,
+                            "advertise": True,
+                        }
+                    }
+                )
+            }
+        )
         try:
             requested_model, payload = app.build_responses_payload_from_anthropic(
                 {
@@ -334,6 +401,88 @@ class Codex2GptCompatibilityTests(unittest.TestCase):
             self.assertEqual(payload["instructions"], "你是一个严格助手")
             self.assertEqual(payload["input"][0]["role"], "user")
             self.assertEqual(payload["input"][0]["content"][0]["text"], "只回复 OK")
+        finally:
+            restore_auth_dir(tempdir, original_auth_dir)
+
+    def test_build_responses_payload_from_anthropic_strips_temperature(self):
+        app, tempdir, original_auth_dir = load_app_module(
+            {
+                "LITE_MODEL_OVERRIDES_JSON": json.dumps(
+                    {
+                        "gpt-5.4-1m": {
+                            "upstream_model": "gpt-5.4",
+                            "context_window": 1000000,
+                            "auto_compact_token_limit": 900000,
+                            "advertise": True,
+                        }
+                    }
+                )
+            }
+        )
+        try:
+            requested_model, payload = app.build_responses_payload_from_anthropic(
+                {
+                    "model": "claude-opus-4-6",
+                    "max_tokens": 256,
+                    "temperature": 0,
+                    "messages": [{"role": "user", "content": "只回复 OK"}],
+                }
+            )
+            self.assertEqual(requested_model, "claude-opus-4-6")
+            self.assertEqual(payload["model"], "gpt-5.4")
+            self.assertNotIn("temperature", payload)
+        finally:
+            restore_auth_dir(tempdir, original_auth_dir)
+
+    def test_build_responses_payload_from_anthropic_accepts_configured_model_override(self):
+        app, tempdir, original_auth_dir = load_app_module(
+            {
+                "LITE_MODEL_OVERRIDES_JSON": json.dumps(
+                    {
+                        "gpt-5.4-1m": {
+                            "upstream_model": "gpt-5.4",
+                            "context_window": 1000000,
+                            "auto_compact_token_limit": 900000,
+                            "advertise": True,
+                        }
+                    }
+                )
+            }
+        )
+        try:
+            requested_model, payload = app.build_responses_payload_from_anthropic(
+                {
+                    "model": "gpt-5.4-1m",
+                    "max_tokens": 256,
+                    "messages": [{"role": "user", "content": "只回复 OK"}],
+                }
+            )
+            self.assertEqual(requested_model, "gpt-5.4-1m")
+            self.assertEqual(payload["model"], "gpt-5.4")
+        finally:
+            restore_auth_dir(tempdir, original_auth_dir)
+
+    def test_advertised_model_catalog_includes_configured_override(self):
+        app, tempdir, original_auth_dir = load_app_module(
+            {
+                "LITE_MODEL_OVERRIDES_JSON": json.dumps(
+                    {
+                        "gpt-5.4-1m": {
+                            "upstream_model": "gpt-5.4",
+                            "context_window": 1000000,
+                            "auto_compact_token_limit": 900000,
+                            "advertise": True,
+                        }
+                    }
+                )
+            }
+        )
+        try:
+            app.RUNTIME_SETTINGS["plans"]["gpt-5.4"] = ["pro"]
+            catalog = app.advertised_model_catalog()
+            by_id = {item["id"]: item for item in catalog}
+            self.assertIn("gpt-5.4-1m", by_id)
+            self.assertEqual(by_id["gpt-5.4-1m"]["supported_plans"], ["pro"])
         finally:
             restore_auth_dir(tempdir, original_auth_dir)
 
@@ -370,7 +519,7 @@ class Codex2GptCompatibilityTests(unittest.TestCase):
                 }
             )
             self.assertEqual(requested_model, "claude-sonnet-4-6")
-            self.assertEqual(payload["model"], "gpt-5.3-codex")
+            self.assertEqual(payload["model"], "gpt-5.4")
             self.assertEqual(payload["tools"][0]["name"], "lookup")
             self.assertEqual(payload["tool_choice"], {"type": "function", "name": "lookup"})
             self.assertEqual(payload["input"][0]["content"][0]["text"], "我来查一下")
@@ -380,8 +529,36 @@ class Codex2GptCompatibilityTests(unittest.TestCase):
         finally:
             restore_auth_dir(tempdir, original_auth_dir)
 
-    def test_build_responses_payload_from_anthropic_ignores_assistant_thinking_blocks(self):
+    def test_build_responses_payload_from_anthropic_maps_haiku_to_codex(self):
         app, tempdir, original_auth_dir = load_app_module()
+        try:
+            requested_model, payload = app.build_responses_payload_from_anthropic(
+                {
+                    "model": "claude-haiku-4-5",
+                    "max_tokens": 256,
+                    "messages": [{"role": "user", "content": "只回复 OK"}],
+                }
+            )
+            self.assertEqual(requested_model, "claude-haiku-4-5")
+            self.assertEqual(payload["model"], "gpt-5.3-codex")
+        finally:
+            restore_auth_dir(tempdir, original_auth_dir)
+
+    def test_build_responses_payload_from_anthropic_ignores_assistant_thinking_blocks(self):
+        app, tempdir, original_auth_dir = load_app_module(
+            {
+                "LITE_MODEL_OVERRIDES_JSON": json.dumps(
+                    {
+                        "gpt-5.4-1m": {
+                            "upstream_model": "gpt-5.4",
+                            "context_window": 1000000,
+                            "auto_compact_token_limit": 900000,
+                            "advertise": True,
+                        }
+                    }
+                )
+            }
+        )
         try:
             requested_model, payload = app.build_responses_payload_from_anthropic(
                 {
@@ -405,6 +582,39 @@ class Codex2GptCompatibilityTests(unittest.TestCase):
             self.assertEqual(payload["input"][0]["content"][0]["text"], "我来继续处理")
             self.assertEqual(payload["input"][1]["role"], "user")
             self.assertEqual(payload["input"][1]["content"][0]["text"], "继续")
+        finally:
+            restore_auth_dir(tempdir, original_auth_dir)
+
+    def test_anthropic_budget_model_uses_opus_1m_alias(self):
+        app, tempdir, original_auth_dir = load_app_module(
+            {
+                "LITE_MODEL_OVERRIDES_JSON": json.dumps(
+                    {
+                        "gpt-5.4-1m": {
+                            "upstream_model": "gpt-5.4",
+                            "context_window": 60,
+                            "auto_compact_token_limit": 50,
+                            "advertise": True,
+                        }
+                    }
+                )
+            }
+        )
+        try:
+            payload = app.build_responses_payload_from_anthropic(
+                {
+                    "model": "claude-opus-4-6",
+                    "max_tokens": 256,
+                    "messages": [{"role": "user", "content": "x" * 400}],
+                }
+            )[1]
+            estimated, spec, error = app.validate_context_budget(
+                payload, requested_model=app.anthropic_budget_model("claude-opus-4-6")
+            )
+            self.assertGreater(estimated, 60)
+            self.assertEqual(spec["requested_model"], "gpt-5.4-1m")
+            self.assertEqual(spec["effective_model"], "gpt-5.4")
+            self.assertIn("configured model context window 60", error)
         finally:
             restore_auth_dir(tempdir, original_auth_dir)
 
@@ -595,10 +805,16 @@ class Codex2GptCompatibilityTests(unittest.TestCase):
         finally:
             restore_auth_dir(tempdir, original_auth_dir)
 
-    def test_messages_endpoint_rejects_unsupported_anthropic_model(self):
+    def test_messages_endpoint_accepts_haiku_alias(self):
         app, tempdir, original_auth_dir = load_app_module()
         try:
-            with run_test_server(app) as base_url:
+            canned = {
+                "id": "resp_haiku",
+                "status": "completed",
+                "output": [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "hello"}]}],
+                "usage": {"input_tokens": 10, "output_tokens": 2},
+            }
+            with run_test_server(app, fetch_response=canned) as base_url:
                 req = urllib.request.Request(
                     f"{base_url}/v1/messages",
                     data=json.dumps(
@@ -611,11 +827,10 @@ class Codex2GptCompatibilityTests(unittest.TestCase):
                     headers={"Content-Type": "application/json", "anthropic-version": "2023-06-01"},
                     method="POST",
                 )
-                with self.assertRaises(urllib.error.HTTPError) as ctx:
-                    urllib.request.urlopen(req, timeout=30)
-                payload = json.loads(ctx.exception.read().decode("utf-8"))
-            self.assertEqual(ctx.exception.code, 400)
-            self.assertEqual(payload["error"]["type"], "invalid_request_error")
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    payload = json.load(resp)
+            self.assertEqual(payload["model"], "claude-haiku-4-5")
+            self.assertEqual(payload["content"][0]["text"], "hello")
         finally:
             restore_auth_dir(tempdir, original_auth_dir)
 
@@ -952,6 +1167,46 @@ class Codex2GptCompatibilityTests(unittest.TestCase):
                         payload = json.load(resp)
                 self.assertTrue(payload["transcripts_enabled"])
                 self.assertEqual(payload["transcript_dir"], transcript_dir)
+            finally:
+                restore_auth_dir(tempdir, original_auth_dir)
+
+    def test_transcript_records_requested_and_effective_model_for_override(self):
+        with tempfile.TemporaryDirectory() as transcript_dir:
+            app, tempdir, original_auth_dir = load_app_module(
+                {
+                    "LITE_TRANSCRIPT_ENABLED": "1",
+                    "LITE_TRANSCRIPT_DIR": transcript_dir,
+                    "LITE_MODEL_OVERRIDES_JSON": json.dumps(
+                        {
+                            "gpt-5.4-1m": {
+                                "upstream_model": "gpt-5.4",
+                                "context_window": 1000000,
+                                "auto_compact_token_limit": 900000,
+                                "advertise": True,
+                            }
+                        }
+                    ),
+                }
+            )
+            try:
+                canned = {
+                    "id": "resp_override",
+                    "status": "completed",
+                    "output": [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "hello override"}]}],
+                    "usage": {"input_tokens": 12, "output_tokens": 4},
+                }
+                with run_test_server(app, upstream_body=responses_sse_body(canned)) as base_url:
+                    req = urllib.request.Request(
+                        f"{base_url}/v1/responses",
+                        data=json.dumps({"model": "gpt-5.4-1m", "input": "hello override", "stream": False}).encode("utf-8"),
+                        headers={"Content-Type": "application/json"},
+                        method="POST",
+                    )
+                    with urllib.request.urlopen(req, timeout=30):
+                        pass
+                _, records = read_transcript_records(transcript_dir)
+                self.assertEqual(records[0]["request"]["requested_model"], "gpt-5.4-1m")
+                self.assertEqual(records[0]["request"]["effective_model"], "gpt-5.4")
             finally:
                 restore_auth_dir(tempdir, original_auth_dir)
 

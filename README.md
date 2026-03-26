@@ -137,7 +137,39 @@ curl http://127.0.0.1:18100/v1/chat/completions \
   }'
 ```
 
+模型级上下文覆盖示例：
+
+项目根目录默认会读取 [model-overrides.toml](model-overrides.toml)。其中可以额外暴露一个本地模型 `gpt-5.4-1m`，它会映射到上游 `gpt-5.4`，但使用独立的 1M 上下文窗口：
+
+```toml
+[model_overrides."gpt-5.4-1m"]
+upstream_model = "gpt-5.4"
+context_window = 1000000
+auto_compact_token_limit = 900000
+advertise = true
+```
+
+其他模型仍继续使用 `~/.codex/config.toml` 里的全局默认窗口配置。完整示例可参考 [docs/codex-config.example.toml](docs/codex-config.example.toml)。
+
+说明：
+
+- `gpt-5.4` 仍是普通上下文版本，继续使用全局默认窗口。
+- `gpt-5.4-1m` 是项目里额外暴露的本地模型名，只在代理侧区分，转发到上游时仍会使用 `gpt-5.4`。
+- 只有确实需要超长上下文时再选择 `gpt-5.4-1m`。1M 窗口会显著增加输入 token 消耗，也可能带来更高的成本、更慢的请求耗时，以及更频繁的上下文整理。
+
 调用 Anthropic Messages：
+
+Anthropic 兼容层当前映射：
+
+- `claude-opus-4-6` -> 本地 `gpt-5.4-1m` -> 上游 `gpt-5.4`
+- `claude-sonnet-4-6` -> 本地 `gpt-5.4` -> 上游 `gpt-5.4`
+- `claude-haiku-4-5` -> 本地 `gpt-5.3-codex` -> 上游 `gpt-5.3-codex`
+
+Anthropic 兼容层的 1M 特殊说明：
+
+- `claude-opus-4-6` 现在会走 `gpt-5.4-1m` 的模型预算，因此它默认就是 1M 上下文版本。
+- 如果你希望 Anthropic 接口走普通窗口，请使用 `claude-sonnet-4-6`。
+- 选择 `claude-opus-4-6` 同样会带来更高的 token 消耗、潜在更高成本，以及更慢的请求耗时。
 
 ```bash
 curl http://127.0.0.1:18100/v1/messages \
