@@ -408,6 +408,56 @@ class Codex2GptCompatibilityTests(unittest.TestCase):
         finally:
             restore_auth_dir(tempdir, original_auth_dir)
 
+    def test_extract_quota_summary_uses_nearest_windows_from_additional_limits(self):
+        app, tempdir, original_auth_dir = load_app_module()
+        try:
+            summary = app.extract_quota_summary(
+                {
+                    "plan_type": "team",
+                    "rate_limit": {
+                        "allowed": True,
+                        "limit_reached": False,
+                        "primary_window": {
+                            "used_percent": 3,
+                            "reset_at": 111,
+                            "reset_after_seconds": 120,
+                            "limit_window_seconds": 300,
+                        },
+                        "secondary_window": {
+                            "used_percent": 8,
+                            "reset_at": 222,
+                            "reset_after_seconds": 900,
+                            "limit_window_seconds": 1200,
+                        },
+                    },
+                    "additional_rate_limits": [
+                        {
+                            "rate_limit": {
+                                "primary_window": {
+                                    "used_percent": 61,
+                                    "reset_at": 333,
+                                    "reset_after_seconds": 7200,
+                                    "limit_window_seconds": 18000,
+                                },
+                                "secondary_window": {
+                                    "used_percent": 74,
+                                    "reset_at": 444,
+                                    "reset_after_seconds": 500000,
+                                    "limit_window_seconds": 604800,
+                                },
+                            }
+                        }
+                    ],
+                }
+            )
+            self.assertEqual(summary["used_percent"], 61)
+            self.assertEqual(summary["reset_at"], 333)
+            self.assertEqual(summary["limit_window_seconds"], 18000)
+            self.assertEqual(summary["secondary_rate_limit"]["used_percent"], 74)
+            self.assertEqual(summary["secondary_rate_limit"]["limit_window_seconds"], 604800)
+        finally:
+            restore_auth_dir(tempdir, original_auth_dir)
+
     def test_extract_session_context_supports_anthropic_business_fields(self):
         app, tempdir, original_auth_dir = load_app_module()
         try:

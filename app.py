@@ -1670,7 +1670,33 @@ def extract_quota_summary(raw_quota):
     rate_limit = raw_quota.get("rate_limit") if isinstance(raw_quota.get("rate_limit"), dict) else {}
     primary_window = rate_limit.get("primary_window") if isinstance(rate_limit.get("primary_window"), dict) else {}
     secondary_window = rate_limit.get("secondary_window") if isinstance(rate_limit.get("secondary_window"), dict) else {}
+    additional_limits = raw_quota.get("additional_rate_limits") if isinstance(raw_quota.get("additional_rate_limits"), list) else []
     code_review_rate_limit = raw_quota.get("code_review_rate_limit") if isinstance(raw_quota.get("code_review_rate_limit"), dict) else {}
+    windows = []
+
+    def append_window(candidate):
+        if isinstance(candidate, dict) and isinstance(candidate.get("limit_window_seconds"), (int, float)):
+            windows.append(candidate)
+
+    append_window(primary_window)
+    append_window(secondary_window)
+    for limit in additional_limits:
+        if not isinstance(limit, dict):
+            continue
+        nested_rate_limit = limit.get("rate_limit") if isinstance(limit.get("rate_limit"), dict) else {}
+        append_window(nested_rate_limit.get("primary_window"))
+        append_window(nested_rate_limit.get("secondary_window"))
+
+    def nearest_window(target_seconds):
+        if not windows:
+            return {}
+        return min(
+            windows,
+            key=lambda window: abs(int(window.get("limit_window_seconds") or 0) - target_seconds),
+        )
+
+    display_primary = nearest_window(5 * 60 * 60) or primary_window
+    display_secondary = nearest_window(7 * 24 * 60 * 60) or secondary_window
     return {
         "user_id": raw_quota.get("user_id"),
         "account_id": raw_quota.get("account_id"),
@@ -1678,18 +1704,18 @@ def extract_quota_summary(raw_quota):
         "plan_type": raw_quota.get("plan_type"),
         "allowed": rate_limit.get("allowed"),
         "limit_reached": rate_limit.get("limit_reached"),
-        "used_percent": primary_window.get("used_percent"),
-        "reset_at": primary_window.get("reset_at"),
-        "reset_after_seconds": primary_window.get("reset_after_seconds"),
-        "limit_window_seconds": primary_window.get("limit_window_seconds"),
+        "used_percent": display_primary.get("used_percent"),
+        "reset_at": display_primary.get("reset_at"),
+        "reset_after_seconds": display_primary.get("reset_after_seconds"),
+        "limit_window_seconds": display_primary.get("limit_window_seconds"),
         "secondary_rate_limit": {
-            "used_percent": secondary_window.get("used_percent"),
-            "reset_at": secondary_window.get("reset_at"),
-            "reset_after_seconds": secondary_window.get("reset_after_seconds"),
-            "limit_window_seconds": secondary_window.get("limit_window_seconds"),
+            "used_percent": display_secondary.get("used_percent"),
+            "reset_at": display_secondary.get("reset_at"),
+            "reset_after_seconds": display_secondary.get("reset_after_seconds"),
+            "limit_window_seconds": display_secondary.get("limit_window_seconds"),
             "limit_reached": False,
         }
-        if secondary_window
+        if display_secondary
         else {},
         "rate_limit": {
             "allowed": rate_limit.get("allowed"),
@@ -1699,6 +1725,7 @@ def extract_quota_summary(raw_quota):
         },
         "code_review_rate_limit": code_review_rate_limit,
         "credits": raw_quota.get("credits") if isinstance(raw_quota.get("credits"), dict) else {},
+        "additional_rate_limits": additional_limits,
         "raw": raw_quota,
     }
 
